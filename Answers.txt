@@ -1,0 +1,200 @@
+Part I
+1. Are there any data quality issues present?
+
+a. Table products and table transactions have duplicates. I removed the duplicates for Product table and output to a new csv file Products_unique.csv. I did not remove duplicates for transactions table as the records come in pairs, which I will explain in the next question "Are there any fields that are challenging to understand?"
+
+Python code fragments for this issue:
+
+# Check for duplicates
+print(users.duplicated().sum())
+print(transactions.duplicated().sum())
+print(products.duplicated().sum())
+
+b. Table products contains missing value in its primary key integer(as specified in the provided Entity Relationship Model)
+
+SQL code fragments for this issue:
+
+select * from product
+where barcode is Null
+limit 10;
+
+/*count the number of rows with empty barcode*/
+select count(*) as null_barcode
+from product
+where barcode is Null;
+
+c. Table Transactions contains character 'zero' instead of 0 in numeric field quantity
+
+SQL code fragments for this issue:
+
+select * from Transactions
+where (FINAL_QUANTITY = 'zero')
+limit 10;
+
+d. Table Transactions contains space ' ' instead of null in numeric field sale
+
+SQL code fragments for this issue:
+
+select * from Transactions
+where (FINAL_SALE = ' ')
+limit 10;
+
+e. Only 261 Users have both register information and transaction records. Compared to 100000 registered users and 17694 users have transaction records, this is a huge data loss.
+select count(*) from Users; /* 100000 registered users*/
+select count(distinct user_id) from Transactions; /*17694 users have transaction records*/
+select count(id) from Users U join Transactions T on U.id = T.user_id; /*261 Users have both register information and transaction records*/
+
+
+2. Are there any fields that are challenging to understand?
+
+a. Table Transactions has some rows with field barcode = -1, which I assume to be a typo or incorrect value
+
+Python code fragments for this issue:
+
+print(transactions.describe())
+
+b. The Final_Quantity and Final_Sale field in Table Transactions are also challenging to understand.
+
+After sorting by receipt_id and barcode, I find there are even number of records for each unique group of (receipt_id, barcode). Most of these groups are group of two records. For these two records, if the final_quantity fields equal each other, then one of the records has null value in final_sale field, otherwise the final_sale field equal each other. I assume if final_quantity fields equal each other, then the transaction is not valid and the product is not sold, resulting a null final sale. On the other hand, if final_quantity fields do not equal, I assume the inventory has been changed and there is a valid transaction with sales equal to the final_sale value. In short, an null value in final_sale field means the group is an invalid transaction. For convenience, I will call this kind of two-records group a 'Whole Transaction'. Applying this assumption to (receipt_id, barcode) groups with more than 2 records, it is not surprising to find out that these are just multiple 'Whole Transaction's for one barcode, which means under this receipt, a user purchase this product(barcode) multiple times. To conclude, a null value in final_sale indicates a invalid transaction and two equal final_sale fields in a (receipt_id, barcode) indicate a valid transaction.
+
+SQL code for supporting this assumption:
+
+/*For each unique group of RECEIPT_ID and barcode, most groups are group of 2 records*/
+select RECEIPT_ID, barcode, count(final_quantity)  from Transactions
+Group by RECEIPT_ID, barcode
+order by count(final_quantity) desc
+
+select * from Transactions 
+order by RECEIPT_ID, barcode;
+
+/*Groups with more than two records are multiple pairs of group of 2 records*/
+select * from Transactions where (receipt_id, barcode) in 
+(select RECEIPT_ID, barcode from Transactions
+Group by RECEIPT_ID, barcode
+having count(final_quantity) > 2)
+Order by receipt_id, barcode;
+
+c. Fields like category_1, category_2, etc., in the Products table are also challenging to understand without additional context.
+
+Part II
+
+3.Closed-ended questions: What are the top 5 brands by receipts scanned among users 21 and over? 
+
+/*only count receipts with at least one valid transaction as valid receipts*/
+select brand, count(distinct RECEIPT_ID) as RECEIPT_COUNT from 
+(
+select RECEIPT_ID, barcode
+from Transactions T join Users U
+on U.id = T.user_id
+where (CURRENT_TIMESTAMP - make_interval(21)) > birth_date
+and RECEIPT_ID in 
+(
+Select RECEIPT_ID from Transactions
+Group by RECEIPT_ID
+having (count(final_sale) - sum(case when final_sale is null then 1 else 0 end) > 0) 
+)
+) as valid_receipt
+join Product P 
+on valid_receipt.barcode = P.barcode
+where brand is not null
+Group by brand
+order by RECEIPT_COUNT DESC
+limit 5
+;
+
+The top 5 brands by receipts scanned among users 21 and over are:
+"NERDS CANDY"
+"TRIDENT"
+"CHEX MIX"
+"COORS LIGHT"
+"COCA-COLA"
+
+
+
+4. Closed-ended questions: What are the top 5 brands by sales among users that have had their account for at least six months?
+
+select brand, sum(FINAL_SALE) as Total_sale from 
+(Select FINAL_SALE, barcode
+from Transactions T join Users U
+on U.id = T.user_id
+where (CURRENT_TIMESTAMP - make_interval(months => 6)) > created_date ) as TU
+left join Product P 
+on TU.barcode = P.barcode
+where brand is not null
+Group by brand
+order by Total_sale DESC
+limit 5
+;
+
+Top 5 brands by sales among users that have had their account for at least six months are:
+"TRIDENT"
+"COORS LIGHT"
+"DOVE"
+"QUAKER"
+"AXE"
+
+5. Open-ended questions: Who are Fetch’s Power Users?
+
+/*Assumption: Power users are defined as users who have spent the most money.*/
+
+select user_id, created_date, birth_date, Total_spent from 
+(select user_id, round(sum(final_sale * valid_transaction_count / 2),2) as Total_spent
+from (
+select user_id, RECEIPT_ID,barcode,final_sale, (count(final_sale) - sum(case when final_sale is null then 1 else 0 end)) as valid_transaction_count
+from Transactions
+Group by RECEIPT_ID,barcode,final_sale, user_id
+having count(final_sale) > 0 and (count(final_sale) - sum(case when final_sale is null then 1 else 0 end)) % 2 = 0
+) as valid_transactions
+Group by user_id) as user_total
+join Users U
+on user_total.user_id = U.id
+Order by Total_spent DESC
+limit 10;
+
+Top 10 power users are:
+"62ffec490d9dbaff18c0a999"
+"5f4c9055e81e6f162e3f6fa8"
+"5d191765c8b1ba28e74e8463"
+"6351760a3a4a3534d9393ecd"
+"64dd9170516348066e7c4006"
+"61730bba65abe727fff3fcf7"
+"62c09104baa38d1a1f6c260e"
+"5f21e60446f11314a16015de"
+"6682b24786cc41b000ce5e77"
+"6661ed1e7c0469953bfc76c4"
+
+Part III
+
+Subject: Data Exploration Summary and Next Steps
+
+Hi Manager,
+
+I’ve completed an initial exploration of the data, and here are the key findings:
+
+Data Quality Issues:
+
+Only 261 Users have both register information and transaction records. Compared to 100000 registered users and 17694 users have transaction records, this is a huge data loss.
+
+Missing values were found in the barcode field in the both Product table and Transactions table.
+
+Character 'zero' instead of number 0 were found in FINAL_QUANTITY, a numeric field in the Transactions table.
+
+Space ' ' instead of Null or 0 were found in FINAL_SALE, a numeric field in the Transactions table.
+
+Interesting Trend:
+
+Brand 'Trident' is one of the top 5 brands by receipts scanned among users 21 and over and also one of top 5 brands by sales among users that have had their account for at least six months. This indicates how popular this brand this.
+
+Request for Action:
+
+Additional context or documentation for the category fields in the Products table would be helpful.
+
+Clarification on how to handle missing values in the barcode field.
+
+Clarification on how to interpret the final_sale and final_quantity fields.
+
+Please let me know if you need further details or have any questions.
+
+Best regards,
+Yiran
+
